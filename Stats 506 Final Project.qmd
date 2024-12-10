@@ -1,0 +1,299 @@
+---
+title: "Stats 506 Final Project"
+author: "Alyssa Yang"
+format:
+    html: 
+       embed-resources: true
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(stats)
+library(lme4)
+```
+
+
+# Import and clean data
+```{r}
+# Read in Medicare data
+medicare_2018 <- read.csv("data/Medicare_Physician_Other_Practitioners_by_Provider_2018.csv")
+medicare_2019 <- read.csv("data/Medicare_Physician_Other_Practitioners_by_Provider_2019.csv")
+medicare_2020 <- read.csv("data/Medicare_Physician_Other_Practitioners_by_Provider_2020.csv")
+medicare_2021 <- read.csv("data/Medicare_Physician_Other_Practitioners_by_Provider_2021.csv")
+medicare_2022 <- read.csv("data/Medicare_Physician_Other_Practitioners_by_Provider_2022.csv")
+
+# Read in Unemployment data
+unemployment <- read.csv("data/Unemployment in America Per US State.csv")
+```
+
+
+
+## Medicare
+```{r}
+# Stack the medicare data
+medicare <- rbind(medicare_2018, medicare_2019, medicare_2020, medicare_2021, medicare_2022)
+
+# Rename columns
+colnames(medicare) <- c("FIPS", "total_beneficiaries", "anxiety_pct", "bipolar_pct", "mood_pct", "depress_pct")
+```
+
+```{r}
+# Find number of beneficiaries with each disorder
+disorders <- c("anxiety_pct", "bipolar_pct", "mood_pct", "depress_pct")
+
+for(disorder in disorders) {
+  # New columns with just disorder name
+  new_col_name <- sub("_pct", "", disorder)
+  medicare[[new_col_name]] <- round(medicare[[disorder]] / 100 * medicare$total_beneficiaries)
+  medicare[[disorder]] <- NULL
+}
+```
+
+```{r}
+# Impute missing values with the median per state
+medicare <- medicare %>% 
+  group_by(FIPS) %>% 
+  mutate(anxiety = ifelse(is.na(anxiety), median(anxiety, na.rm = TRUE), anxiety),
+         bipolar = ifelse(is.na(bipolar), median(bipolar, na.rm = TRUE), bipolar),
+         mood = ifelse(is.na(mood), median(mood, na.rm = TRUE), mood),
+         depress = ifelse(is.na(depress), median(depress, na.rm = TRUE), depress)) %>% 
+  ungroup()
+```
+
+
+```{r}
+# Calculate state-level summaries
+medicare <- medicare %>% 
+  group_by(FIPS) %>% 
+  summarise(total_beneficiaries = sum(total_beneficiaries, na.rm = TRUE),
+            anxiety = sum(anxiety),
+            bipolar = sum(bipolar),
+            mood = sum(mood),
+            depress = sum(depress)) %>% 
+  mutate(anxiety_pct = (anxiety / total_beneficiaries) * 100,
+         bipolar_pct = (bipolar / total_beneficiaries) * 100,
+         mood_pct = (mood / total_beneficiaries) * 100,
+         depress_pct = (depress / total_beneficiaries) * 100)
+```
+
+```{r}
+# Change FIPS code to numeric and only keep US states (1-56)
+medicare <- medicare %>% 
+  mutate(FIPS = suppressWarnings(as.numeric(FIPS))) %>%
+  filter(!is.na(FIPS) & FIPS >= 1 & FIPS <= 56)
+
+# Keep only pct columns
+medicare <- medicare %>% 
+  select("FIPS", "anxiety_pct", "bipolar_pct", "mood_pct", "depress_pct")
+```
+
+
+
+## Unemployment
+```{r}
+# Keep FIPS, year, and non-institutionalized columns
+unemployment <- unemployment[, c(1, 3, 5, 7, 9), drop = FALSE]
+
+# Rename columns
+colnames(unemployment) <- c("FIPS", "year", "total", "pct_eligible", "pct_employed")
+```
+
+```{r}
+# Remove commas in total column
+unemployment$total <- gsub(",", "", unemployment$total)
+
+# Change type of all columns to numeric
+for(colname in colnames(unemployment)) {
+  unemployment[[colname]] <- as.numeric(unemployment[[colname]])
+}
+```
+
+```{r}
+# Keep only years 2018-2022
+unemployment <- unemployment %>% 
+  filter(year >= 2018 & year <= 2022)
+
+# Remove year columnA
+unemployment$year <- NULL
+```
+
+```{r}
+# Create new column for unemployed
+unemployment["pct_unemployed"] <- 100 - unemployment$pct_employed
+unemployment$pct_employed <- NULL
+
+# Find total number eligible and unemployed
+cols <- c("pct_eligible", "pct_unemployed")
+for(col in cols) {
+  new_col_name <- sub("pct_", "", col)
+  unemployment[[new_col_name]] <- round(unemployment[[col]] / 100 * unemployment$total)
+  unemployment[[col]] <- NULL
+}
+```
+
+```{r}
+# Calculate state-level summaries
+unemployment <- unemployment %>% 
+  group_by(FIPS) %>% 
+  summarise(total = sum(total, na.rm = TRUE),
+            eligible = sum(eligible),
+            unemployed = sum(unemployed)) %>% 
+  mutate(eligible_pct = (eligible / total) * 100,
+         unemployed_pct = (unemployed / total) * 100)
+```
+
+```{r}
+# Keep only US states (1-56)
+unemployment <- unemployment %>% 
+  filter(FIPS >= 1 & FIPS <= 56)
+
+# Keep only pct columns
+unemployment <- unemployment %>% 
+  select("FIPS", "eligible_pct", "unemployed_pct")
+```
+
+
+
+## Join
+```{r}
+# Convert both FIPS columns to characters
+medicare <- medicare %>% mutate(FIPS = as.numeric(FIPS))
+unemployment <- unemployment %>% mutate(FIPS = as.numeric(FIPS))
+
+# Left join unemployment table onto medicare table
+combined_data <- medicare %>%
+  left_join(unemployment, by = "FIPS")
+```
+
+
+
+
+
+# Model-building
+```{r}
+# Plot each disorder vs unemployment rate by state
+plots <- list()
+
+for (disorder in disorders) {
+  p <- ggplot(combined_data, aes(x = unemployed_pct, y = .data[[disorder]])) +
+    geom_point() +
+    geom_smooth(method = "lm", se = TRUE, color = "blue") +
+    labs(
+      title = paste("Unemployment Rate vs", gsub("_pct", "", disorder, fixed = TRUE), "Percentage by State"),
+      x = "Unemployment Rate (%)",
+      y = paste(gsub("_pct", "", disorder, fixed = TRUE), "Percentage (%)")
+    )
+  plots[[disorder]] <- p  # Add plot to the list
+}
+
+# Combine the plots using patchwork
+combined_plot <- (plots[[1]] | plots[[2]]) / (plots[[3]] | plots[[4]]) +
+  plot_layout(guides = "collect") +
+  plot_annotation(title = "Relationship Between Unemployment Rate and Mental Health Disorders")
+
+# Save the plot to adjust dimensions
+ggsave("mental_health_vs_unemployment.png", combined_plot, width = 12, height = 8)
+
+# View the plot in larger dimensions
+print(combined_plot)
+```
+
+```{r}
+# Linear models for each disorder
+anxiety_state_model <- lm(anxiety_pct ~ unemployed_pct + eligible_pct, data = combined_data)
+bipolar_state_model <- lm(bipolar_pct ~ unemployed_pct + eligible_pct, data = combined_data)
+mood_state_model <- lm(mood_pct ~ unemployed_pct + eligible_pct, data = combined_data)
+depress_state_model <- lm(depress_pct ~ unemployed_pct + eligible_pct, data = combined_data)
+```
+
+```{r}
+# Summaries
+summary(anxiety_state_model)
+summary(bipolar_state_model)
+summary(mood_state_model)
+summary(depress_state_model)
+```
+
+```{r}
+# Define a mapping of FIPS codes to regions
+region_map <- c(
+  "1" = "South",  # Alabama
+  "2" = "West",   # Alaska
+  "4" = "West",   # Arizona
+  "5" = "South",  # Arkansas
+  "6" = "West",   # California
+  "8" = "West",   # Colorado
+  "9" = "Northeast", # Connecticut
+  "10" = "South",  # Delaware
+  "11" = "Northeast", # District of Columbia
+  "12" = "South",  # Florida
+  "13" = "South",  # Georgia
+  "15" = "West",   # Hawaii
+  "16" = "West",   # Idaho
+  "17" = "Midwest", # Illinois
+  "18" = "Midwest", # Indiana
+  "19" = "Midwest", # Iowa
+  "20" = "Midwest", # Kansas
+  "21" = "South",  # Kentucky
+  "22" = "South",  # Louisiana
+  "23" = "Northeast", # Maine
+  "24" = "South",  # Maryland
+  "25" = "Northeast", # Massachusetts
+  "26" = "Midwest", # Michigan
+  "27" = "Midwest", # Minnesota
+  "28" = "South",  # Mississippi
+  "29" = "Midwest", # Missouri
+  "30" = "West",   # Montana
+  "31" = "Midwest", # Nebraska
+  "32" = "West",   # Nevada
+  "33" = "Northeast", # New Hampshire
+  "34" = "Northeast", # New Jersey
+  "35" = "South",  # New Mexico
+  "36" = "Northeast", # New York
+  "37" = "South",  # North Carolina
+  "38" = "Midwest", # North Dakota
+  "39" = "Midwest", # Ohio
+  "40" = "South",  # Oklahoma
+  "41" = "West",   # Oregon
+  "42" = "Northeast", # Pennsylvania
+  "44" = "Northeast", # Rhode Island
+  "45" = "South",  # South Carolina
+  "46" = "Midwest", # South Dakota
+  "47" = "South",  # Tennessee
+  "48" = "South",  # Texas
+  "49" = "West",   # Utah
+  "50" = "Northeast", # Vermont
+  "51" = "South",  # Virginia
+  "53" = "West",   # Washington
+  "54" = "South",  # West Virginia
+  "55" = "Midwest", # Wisconsin
+  "56" = "West"    # Wyoming
+)
+combined_data$region <- region_map[as.character(combined_data$FIPS)]
+
+# Account for variability within US regions
+anxiety_mixed <- lmer(anxiety_pct ~ unemployed_pct + eligible_pct + (1|region), data = combined_data)
+summary(anxiety_mixed)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
